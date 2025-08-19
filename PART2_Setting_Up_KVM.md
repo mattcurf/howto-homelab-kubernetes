@@ -170,7 +170,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: false
     ssh_authorized_keys:
-      - ssh-rsa AAA <your key here>
+      - ssh-rsa AAA <your public key here>
   - name: root
     lock_passwd: false
     shell: /bin/bash
@@ -213,6 +213,52 @@ write_files:
           enp2s0:
             dhcp4: false
             dhcp6: false
+            addresses: [192.168.6.11/24]
+            nameservers:
+              addresses: [192.168.6.1,1.1.1.1]
+            routes:
+              - to: 0.0.0.0/0
+                via: 192.168.6.1
+
+  - path: /etc/haproxy/haproxy.cfg
+    permissions: '0644'
+    owner: root:root
+    content: |
+      global
+        maxconn 2000
+        log /dev/log local0
+      defaults
+        log     global
+        option  tcplog
+        timeout connect 10s
+        timeout client  1m
+        timeout server  1m
+      frontend k8s_api
+        bind 192.168.6.11:6443
+        default_backend k8s_masters
+      backend k8s_masters
+        balance roundrobin
+        server k8s-cp 192.168.6.10:6443 check
+
+  - path: /etc/systemd/system/haproxy.service.d/wait-for-ip.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Wants=network-online.target
+      After=network-online.target
+      [Service]
+      ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip -4 addr show dev enp2s0 | grep -q "192.168.6.11/24" && exit 0; sleep 1; done; echo "VLAN5 IP not up" >&2; exit 1'
+      Restart=on-failure
+      RestartSec=2
+
+runcmd:
+  - rm -f /etc/netplan/50-cloud-init.yaml
+  - netplan generate
+  - netplan apply
+  - systemctl daemon-reload
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now haproxy
 EOF
 
 sudo cloud-localds /var/lib/libvirt/images/lb-seed.iso     ~/vms/cloudinit/lb-user-data.yaml
