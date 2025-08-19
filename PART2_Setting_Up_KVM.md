@@ -77,7 +77,7 @@ sudo qemu-img create -f qcow2 -F qcow2 \
 ```
 
 ## Step 3: Create our cloud init YAML file used to configure our k8s VM
-This is the cloud init file used to customize our k8s VM. Replace <your public key here> with your actual SSH public key.  Note that this configuration sets a default root password for easy access to the console: this of course is not appropriate for a production network :)
+This is the cloud init file used to customize our k8s VM. Replace <your public key here> with your actual SSH public key.  It creates this virtual machine with a single static IP on our Kubernetes VLAN at 192.168.6.10/24. Note that this configuration sets a default root password for easy access to the console: this of course is not appropriate for a production network :)
 ```bash
 tee ~/vms/cloudinit/k8s-cp-user-data.yaml >/dev/null <<'EOF'
 #cloud-config
@@ -137,25 +137,32 @@ write_files:
               - to: 0.0.0.0/0
                 via: 192.168.6.1
 
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: '0644'
+    content: |
+      cluster-init: true
+      node-ip: 192.168.6.10
+      advertise-address: 192.168.6.10
+      bind-address: 192.168.6.10
+      tls-san:
+        - 192.168.6.10     # control-plane
+        - 192.168.6.11     # HAProxy VIP (VLAN5)
+        - 192.168.1.30     # Public/LAN IP (extra SAN)
+        - homelab.tecnovelty.net
+
 runcmd:
   - rm -f /etc/netplan/50-cloud-init.yaml
   - netplan generate
   - netplan apply
   - systemctl enable --now qemu-guest-agent
-  - |
-    # Install k3s server. Add TLS SAN for the HAProxy VIP/IP (192.168.6.11)
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
-      --cluster-init \
-      --node-ip=192.168.6.10 \
-      --tls-san 192.168.6.11 \
-      --write-kubeconfig-mode=0644" sh -
+  - curl -sfL https://get.k3s.io | sh -
 EOF
 
 sudo cloud-localds /var/lib/libvirt/images/k8s-cp-seed.iso ~/vms/cloudinit/k8s-cp-user-data.yaml
 ```
 
 ## Step 4: Create our cloud init YAML file used to configure our Load balancer VM
-Like step 3, his is the cloud init file used to customize our load balancer VM. Replace <your public key here> with your actual SSH public key.  Note that this configuration sets a default root password for easy access to the console: this of course is not appropriate for a production network :)
+Like step 3, his is the cloud init file used to customize our load balancer VM. Replace <your public key here> with your actual SSH public key.  It creates this virtual machine with a two static IPs: 192.168.1.30/24 on our untagged 'public' network, and on our Kubernetes VLAN at 192.168.6.11/24. Note that this configuration sets a default root password for easy access to the console: this of course is not appropriate for a production network :)
 ```bash
 tee ~/vms/cloudinit/lb-user-data.yaml >/dev/null <<'EOF'
 #cloud-config
@@ -206,19 +213,18 @@ write_files:
         version: 2
         ethernets:
           enp1s0:
-            dhcp4: true
+            dhcp4: false
             dhcp6: false
-            dhcp4-overrides:
-              use-routes: false
+            addresses: [192.168.1.30/24]
+            nameservers:
+              addresses: [192.168.1.1,1.1.1.1]
+            routes:
+              - to: 0.0.0.0/0
+                via: 192.168.1.1
           enp2s0:
             dhcp4: false
             dhcp6: false
             addresses: [192.168.6.11/24]
-            nameservers:
-              addresses: [192.168.6.1,1.1.1.1]
-            routes:
-              - to: 0.0.0.0/0
-                via: 192.168.6.1
 
   - path: /etc/haproxy/haproxy.cfg
     permissions: '0644'
@@ -234,23 +240,11 @@ write_files:
         timeout client  1m
         timeout server  1m
       frontend k8s_api
-        bind 192.168.6.11:6443
+        bind :6443
         default_backend k8s_masters
       backend k8s_masters
         balance roundrobin
         server k8s-cp 192.168.6.10:6443 check
-
-  - path: /etc/systemd/system/haproxy.service.d/wait-for-ip.conf
-    permissions: '0644'
-    owner: root:root
-    content: |
-      [Unit]
-      Wants=network-online.target
-      After=network-online.target
-      [Service]
-      ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip -4 addr show dev enp2s0 | grep -q "192.168.6.11/24" && exit 0; sleep 1; done; echo "VLAN5 IP not up" >&2; exit 1'
-      Restart=on-failure
-      RestartSec=2
 
 runcmd:
   - rm -f /etc/netplan/50-cloud-init.yaml

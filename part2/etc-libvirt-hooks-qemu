@@ -1,0 +1,57 @@
+#!/bin/bash
+# /etc/libvirt/hooks/qemu  — OVS VLAN tagging with logging + robust triggers
+
+LOG="/tmp/ovs-hook.log"
+exec >>"$LOG" 2>&1
+echo "[$(date '+%F %T')] HOOK vm=$1 action=$2 substage=$3"
+
+VM="$1"; ACT="${2:-}"; STAGE="${3:-}"
+BR="br0"
+CONF="/etc/libvirt/hooks/ovs/${VM}.conf"
+
+# wait up to ~5s for a tap to appear
+wait_iface() {
+  local ifn="$1" tries=50
+  while ((tries--)); do ip link show "$ifn" &>/dev/null && return 0; sleep 0.1; done
+  return 1
+}
+
+apply_line() {
+  local ifn="$1" mode="$2" val="$3"
+  # ensure it's on the bridge
+  ovs-vsctl --may-exist add-port "$BR" "$ifn"
+  case "$mode" in
+    tag)    ovs-vsctl set Port "$ifn" tag="$val" ;;
+    trunks) ovs-vsctl set Port "$ifn" trunks="[$val]" ;;
+    *)      echo "[$(date '+%F %T')] WARN unknown mode '$mode' for $ifn" ;;
+  esac
+  echo "[$(date '+%F %T')] APPLIED $ifn $mode $val"
+}
+
+apply_conf() {
+  [[ -f "$CONF" ]] || { echo "[$(date '+%F %T')] NO_CONF $CONF"; return 0; }
+  echo "[$(date '+%F %T')] APPLY_FROM $CONF"
+  while read -r IFN MODE VAL; do
+    [[ -z "$IFN" || "$IFN" =~ ^# ]] && continue
+    if wait_iface "$IFN"; then
+      apply_line "$IFN" "$MODE" "$VAL"
+    else
+      echo "[$(date '+%F %T')] TIMEOUT waiting for iface $IFN"
+    fi
+  done < "$CONF"
+}
+
+case "$ACT" in
+  start|started)
+    # Some libvirt builds only emit *begin*, so apply on both.
+    apply_conf
+    ;;
+  stop|stopped)
+    # (Optional) detach or clear tags if desired
+    :
+    ;;
+  *)
+    :
+    ;;
+esac
+

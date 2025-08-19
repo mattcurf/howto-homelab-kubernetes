@@ -1,0 +1,76 @@
+#cloud-config
+hostname: k8s-cp
+ssh_pwauth: true
+disable_root: false
+
+users:
+  - name: ubuntu
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ssh-rsa AAA <your public key here>
+  - name: root
+    lock_passwd: false
+    shell: /bin/bash
+
+package_update: true
+package_upgrade: true
+packages:
+  - curl
+  - qemu-guest-agent
+
+bootcmd:
+  - sed -i 's/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"/' /etc/default/grub
+  - update-grub
+  - systemctl enable serial-getty@ttyS0.service
+
+chpasswd:
+  expire: false
+  list: |
+    root:changeme123
+
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    permissions: '0644'
+    owner: root:root
+    content: |
+      network: {config: disabled}
+
+  - path: /etc/netplan/01-netcfg.yaml
+    permissions: '0600'
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          enp1s0:
+            dhcp4: false
+            dhcp6: false
+            addresses: [192.168.6.10/24]
+            nameservers:
+              addresses: [192.168.6.1,1.1.1.1]
+            routes:
+              - to: 0.0.0.0/0
+                via: 192.168.6.1
+
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: '0644'
+    content: |
+      cluster-init: true
+      node-ip: 192.168.6.10
+      advertise-address: 192.168.6.10
+      bind-address: 192.168.6.10
+      tls-san:
+        - 192.168.6.10     # control-plane
+        - 192.168.6.11     # HAProxy VIP (VLAN5)
+        - 192.168.1.30     # Public/LAN IP (extra SAN)
+        - homelab.tecnovelty.net
+
+runcmd:
+  - rm -f /etc/netplan/50-cloud-init.yaml
+  - netplan generate
+  - netplan apply
+  - systemctl enable --now qemu-guest-agent
+  - curl -sfL https://get.k3s.io | sh -
